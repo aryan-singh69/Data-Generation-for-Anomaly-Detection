@@ -1,16 +1,3 @@
-"""
-Generate Synthetic IoT Sensor Data for Anomaly Detection
-=========================================================
-This script simulates a machine with 3 sensors (temperature, vibration,
-pressure) recording every minute for 30 days. Normal behaviour follows
-smooth sine-wave patterns with small noise; anomalies are randomly
-injected as short windows of *subtle* deviations that partially overlap
-with normal readings, making detection non-trivial.
-
-Output: iot_sensor_data.csv
-Columns: timestamp, temperature, vibration, pressure, label (0/1)
-"""
-
 import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
