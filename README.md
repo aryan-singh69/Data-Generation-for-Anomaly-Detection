@@ -1,4 +1,4 @@
-# Synthetic Time-Series Data Generation for Anomaly Detection using TimeGAN (IoT/Industry)
+ # Synthetic Time-Series Data Generation for Anomaly Detection using TimeGAN (IoT/Industry)
 
 > **6-Week AI/ML Internship Project**
 
