@@ -1,0 +1,40 @@
+{
+  "sample_counts": {
+    "real_normal_count": 42497,
+    "real_anomaly_count": 657,
+    "synthetic_normal_count": 500,
+    "synthetic_anomaly_count": 500
+  },
+  "baseline": {
+    "accuracy": 0.9906152241918665,
+    "precision": 0.9629629629629629,
+    "recall": 0.3969465648854962,
+    "f1": 0.5621621621621622,
+    "confusion_matrix": [
+      [
+        8498,
+        2
+      ],
+      [
+        79,
+        52
+      ]
+    ]
+  },
+  "augmented": {
+    "accuracy": 0.9883365417280037,
+    "precision": 0.9444444444444444,
+    "recall": 0.5887445887445888,
+    "f1": 0.7253333333333334,
+    "confusion_matrix": [
+      [
+        8592,
+        8
+      ],
+      [
+        95,
+        136
+      ]
+    ]
+  }
+}

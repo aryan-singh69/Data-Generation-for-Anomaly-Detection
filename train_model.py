@@ -11,6 +11,7 @@ and confusion matrices, then saves:
   - model_baseline.pkl       (trained Baseline model)
   - model_augmented.pkl      (trained Augmented model)
   - plots/comparison_metrics.png  (bar chart comparing the two models)
+  - metrics.json             (all key results for the Streamlit dashboard)
 """
 
 import warnings
@@ -19,6 +20,7 @@ warnings.filterwarnings("ignore")        # suppress noisy sklearn / numpy warnin
 import numpy as np
 import pickle
 import os
+import json
 import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
@@ -195,6 +197,39 @@ ax.grid(axis="y", linestyle="--", alpha=0.4)
 plt.tight_layout()
 plt.savefig("plots/comparison_metrics.png", dpi=150)
 print("  ✓ Saved plots/comparison_metrics.png")
+
+# ────────────────────────────────────────────────────────────────────────────
+# Step 10: Save all key results to metrics.json
+#   This lets the Streamlit dashboard load a small JSON instead of the
+#   large .npy files — much easier for deployment.
+# ────────────────────────────────────────────────────────────────────────────
+metrics_summary = {
+    "sample_counts": {
+        "real_normal_count":      int(len(normal_windows)),
+        "real_anomaly_count":     int(len(anomaly_windows)),
+        "synthetic_normal_count":  int(len(synthetic_normal_windows)),
+        "synthetic_anomaly_count": int(len(synthetic_anomaly_windows)),
+    },
+    "baseline": {
+        "accuracy":         base_metrics["Accuracy"],
+        "precision":        base_metrics["Precision"],
+        "recall":           base_metrics["Recall"],
+        "f1":               base_metrics["F1-Score"],
+        "confusion_matrix": base_metrics["Confusion"].tolist(),
+    },
+    "augmented": {
+        "accuracy":         aug_metrics["Accuracy"],
+        "precision":        aug_metrics["Precision"],
+        "recall":           aug_metrics["Recall"],
+        "f1":               aug_metrics["F1-Score"],
+        "confusion_matrix": aug_metrics["Confusion"].tolist(),
+    },
+}
+
+with open("metrics.json", "w") as f:
+    json.dump(metrics_summary, f, indent=2)
+
+print("  ✓ Saved metrics.json")
 
 print("\n" + "=" * 65)
 print("  Done! Both models trained, evaluated, and saved.")
