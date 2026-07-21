@@ -3,11 +3,15 @@ __pycache__/
 *.pyc
 .ipynb_checkpoints/
 
-# Generated data
+# Generated data (not needed for app)
 *.npy
-*.csv
-*.pkl
+timestamps.csv
 
-# Trained models
+# Ignore all pkl except the ones the app needs
+*.pkl
+!model_augmented.pkl
+!scaler.pkl
+
+# Trained TimeGAN models (large, not needed for app)
 timegan_model/
 timegan_anomaly_model/
