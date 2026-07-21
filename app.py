@@ -19,17 +19,11 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import pickle
+import json
 import os
+import traceback
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import (
-    accuracy_score,
-    precision_score,
-    recall_score,
-    f1_score,
-    confusion_matrix,
-)
 
 # ═══════════════════════════════════════════════════════════════════════════
 # PAGE CONFIG  — must be the very first Streamlit command
@@ -165,110 +159,231 @@ section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] {
 
 # ═══════════════════════════════════════════════════════════════════════════
 # CACHED LOADERS  — models and scaler loaded once, then reused
+#
+# Each loader returns (object, None) on success or (None, error_string) on
+# failure.  This prevents the app from crashing when files are missing or
+# when there is a sklearn version mismatch on the deployment server.
 # ═══════════════════════════════════════════════════════════════════════════
 @st.cache_resource
 def load_augmented_model():
     """Load the trained Augmented RandomForest from model_augmented.pkl."""
-    with open(_path("model_augmented.pkl"), "rb") as f:
-        return pickle.load(f)
+    model_path = _path("model_augmented.pkl")
+    if not os.path.exists(model_path):
+        return None, "model_augmented.pkl not found."
+    try:
+        with open(model_path, "rb") as f:
+            return pickle.load(f), None
+    except Exception as e:
+        return None, f"Failed to load model_augmented.pkl: {e}"
 
 
 @st.cache_resource
 def load_baseline_model():
     """Load the trained Baseline RandomForest from model_baseline.pkl."""
-    with open(_path("model_baseline.pkl"), "rb") as f:
-        return pickle.load(f)
+    model_path = _path("model_baseline.pkl")
+    if not os.path.exists(model_path):
+        return None, "model_baseline.pkl not found."
+    try:
+        with open(model_path, "rb") as f:
+            return pickle.load(f), None
+    except Exception as e:
+        return None, f"Failed to load model_baseline.pkl: {e}"
 
 
 @st.cache_resource
 def load_scaler():
     """Load the fitted MinMaxScaler from scaler.pkl."""
-    with open(_path("scaler.pkl"), "rb") as f:
-        return pickle.load(f)
+    scaler_path = _path("scaler.pkl")
+    if not os.path.exists(scaler_path):
+        return None, "scaler.pkl not found."
+    try:
+        with open(scaler_path, "rb") as f:
+            return pickle.load(f), None
+    except Exception as e:
+        return None, f"Failed to load scaler.pkl: {e}"
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# COMPUTE METRICS  — runs once (cached), then reused across page views
+# LOAD METRICS  — prefer the lightweight metrics.json produced by
+# train_model.py.  Fall back to recomputing from .npy + .pkl files only
+# if the JSON is missing.  This makes deployment much lighter because the
+# large .npy arrays are no longer required on the server.
 # ═══════════════════════════════════════════════════════════════════════════
 @st.cache_data
-def compute_all_metrics():
+def load_metrics_from_json():
     """
-    Reproduce the exact evaluation from train_model.py:
-      1. Load the windowed .npy arrays
-      2. Build Baseline (real-only) and Augmented (real+synthetic) datasets
-      3. 80/20 stratified split with random_state=42
-      4. Predict with both saved models
-      5. Return metrics dict + sample counts
+    Read metrics.json and reshape it into the dict format the pages expect:
+      { "baseline": { "Accuracy", "Precision", "Recall", "F1-Score", "Confusion" },
+        "augmented": { ... },
+        "counts":    { "total_real", "total_syn", ... } }
+    Returns (metrics_dict, None) on success, or (None, error_string).
     """
-    # ── Load windowed arrays ──────────────────────────────────────────────
-    normal_w  = np.load(_path("normal_windows.npy"))
-    anomaly_w = np.load(_path("anomaly_windows.npy"))
-    syn_norm  = np.load(_path("synthetic_normal_windows.npy"))
-    syn_anom  = np.load(_path("synthetic_anomaly_windows.npy"))
+    json_path = _path("metrics.json")
+    if not os.path.exists(json_path):
+        return None, "metrics.json not found."
+    try:
+        with open(json_path, "r") as f:
+            raw = json.load(f)
 
-    # ── Flatten: (N, 24, 3) → (N, 72) ────────────────────────────────────
-    normal_flat   = normal_w.reshape(len(normal_w), -1)
-    anomaly_flat  = anomaly_w.reshape(len(anomaly_w), -1)
-    syn_norm_flat = syn_norm.reshape(len(syn_norm), -1)
-    syn_anom_flat = syn_anom.reshape(len(syn_anom), -1)
+        # Reshape into the format the dashboard pages expect
+        def _reshape(section):
+            return {
+                "Accuracy":  section["accuracy"],
+                "Precision": section["precision"],
+                "Recall":    section["recall"],
+                "F1-Score":  section["f1"],
+                "Confusion": section["confusion_matrix"],
+            }
 
-    # ── Baseline dataset (real only) ──────────────────────────────────────
-    X_base = np.vstack([normal_flat, anomaly_flat])
-    y_base = np.concatenate(
-        [np.zeros(len(normal_flat)), np.ones(len(anomaly_flat))]
-    )
+        counts = raw.get("sample_counts", {})
+        metrics = {
+            "baseline":  _reshape(raw["baseline"]),
+            "augmented": _reshape(raw["augmented"]),
+            "counts": {
+                "real_normal":  counts.get("real_normal_count", 0),
+                "real_anomaly": counts.get("real_anomaly_count", 0),
+                "syn_normal":   counts.get("synthetic_normal_count", 0),
+                "syn_anomaly":  counts.get("synthetic_anomaly_count", 0),
+                "total_real":   counts.get("real_normal_count", 0)
+                                + counts.get("real_anomaly_count", 0),
+                "total_syn":    counts.get("synthetic_normal_count", 0)
+                                + counts.get("synthetic_anomaly_count", 0),
+            },
+        }
+        return metrics, None
+    except Exception as e:
+        return None, f"Failed to read metrics.json: {e}"
 
-    # ── Augmented dataset (real + synthetic) ──────────────────────────────
-    X_aug = np.vstack(
-        [normal_flat, syn_norm_flat, anomaly_flat, syn_anom_flat]
-    )
-    y_aug = np.concatenate(
-        [
-            np.zeros(len(normal_flat) + len(syn_norm_flat)),
-            np.ones(len(anomaly_flat) + len(syn_anom_flat)),
-        ]
-    )
 
-    # ── 80 / 20 stratified split (same seed as train_model.py) ────────────
-    _, X_base_test, _, y_base_test = train_test_split(
-        X_base, y_base, test_size=0.2, random_state=42, stratify=y_base,
-    )
-    _, X_aug_test, _, y_aug_test = train_test_split(
-        X_aug, y_aug, test_size=0.2, random_state=42, stratify=y_aug,
-    )
+@st.cache_data
+def compute_metrics_from_npy():
+    """
+    Fallback: reproduce the exact evaluation from train_model.py using the
+    .npy arrays and .pkl models.  This is only called when metrics.json is
+    missing (e.g. during local development before train_model.py is re-run).
 
-    # ── Load both models (inside this function to keep it self-contained) ─
-    with open(_path("model_baseline.pkl"), "rb") as f:
-        baseline_model = pickle.load(f)
-    with open(_path("model_augmented.pkl"), "rb") as f:
-        augmented_model = pickle.load(f)
+    Returns (metrics_dict, None) on success, or (None, error_string).
+    """
+    # Late import — only needed for this fallback path
+    try:
+        from sklearn.model_selection import train_test_split
+        from sklearn.metrics import (
+            accuracy_score,
+            precision_score,
+            recall_score,
+            f1_score,
+            confusion_matrix,
+        )
+    except ImportError as e:
+        return None, f"scikit-learn is required but could not be imported: {e}"
 
-    # ── Evaluate ──────────────────────────────────────────────────────────
-    def _eval(model, X_test, y_test):
-        y_pred = model.predict(X_test)
-        return {
-            "Accuracy":  accuracy_score(y_test, y_pred),
-            "Precision": precision_score(y_test, y_pred, zero_division=0),
-            "Recall":    recall_score(y_test, y_pred, zero_division=0),
-            "F1-Score":  f1_score(y_test, y_pred, zero_division=0),
-            # .tolist() so the result is JSON-serialisable for st.cache_data
-            "Confusion": confusion_matrix(y_test, y_pred).tolist(),
+    # ── Check that every required file exists before loading ──────────────
+    required_files = [
+        "normal_windows.npy",
+        "anomaly_windows.npy",
+        "synthetic_normal_windows.npy",
+        "synthetic_anomaly_windows.npy",
+        "model_baseline.pkl",
+        "model_augmented.pkl",
+    ]
+    missing = [f for f in required_files if not os.path.exists(_path(f))]
+    if missing:
+        return None, (
+            "Cannot compute metrics — missing files: "
+            + ", ".join(missing)
+        )
+
+    try:
+        # ── Load windowed arrays ──────────────────────────────────────────
+        normal_w  = np.load(_path("normal_windows.npy"))
+        anomaly_w = np.load(_path("anomaly_windows.npy"))
+        syn_norm  = np.load(_path("synthetic_normal_windows.npy"))
+        syn_anom  = np.load(_path("synthetic_anomaly_windows.npy"))
+
+        # ── Flatten: (N, 24, 3) → (N, 72) ────────────────────────────────
+        normal_flat   = normal_w.reshape(len(normal_w), -1)
+        anomaly_flat  = anomaly_w.reshape(len(anomaly_w), -1)
+        syn_norm_flat = syn_norm.reshape(len(syn_norm), -1)
+        syn_anom_flat = syn_anom.reshape(len(syn_anom), -1)
+
+        # ── Baseline dataset (real only) ──────────────────────────────────
+        X_base = np.vstack([normal_flat, anomaly_flat])
+        y_base = np.concatenate(
+            [np.zeros(len(normal_flat)), np.ones(len(anomaly_flat))]
+        )
+
+        # ── Augmented dataset (real + synthetic) ──────────────────────────
+        X_aug = np.vstack(
+            [normal_flat, syn_norm_flat, anomaly_flat, syn_anom_flat]
+        )
+        y_aug = np.concatenate(
+            [
+                np.zeros(len(normal_flat) + len(syn_norm_flat)),
+                np.ones(len(anomaly_flat) + len(syn_anom_flat)),
+            ]
+        )
+
+        # ── 80 / 20 stratified split (same seed as train_model.py) ────────
+        _, X_base_test, _, y_base_test = train_test_split(
+            X_base, y_base, test_size=0.2, random_state=42, stratify=y_base,
+        )
+        _, X_aug_test, _, y_aug_test = train_test_split(
+            X_aug, y_aug, test_size=0.2, random_state=42, stratify=y_aug,
+        )
+
+        # ── Load both models ─────────────────────────────────────────────
+        with open(_path("model_baseline.pkl"), "rb") as f:
+            baseline_model = pickle.load(f)
+        with open(_path("model_augmented.pkl"), "rb") as f:
+            augmented_model = pickle.load(f)
+
+        # ── Evaluate ──────────────────────────────────────────────────────
+        def _eval(model, X_test, y_test):
+            y_pred = model.predict(X_test)
+            return {
+                "Accuracy":  accuracy_score(y_test, y_pred),
+                "Precision": precision_score(y_test, y_pred, zero_division=0),
+                "Recall":    recall_score(y_test, y_pred, zero_division=0),
+                "F1-Score":  f1_score(y_test, y_pred, zero_division=0),
+                # .tolist() so the result is JSON-serialisable for cache_data
+                "Confusion": confusion_matrix(y_test, y_pred).tolist(),
+            }
+
+        base_m = _eval(baseline_model, X_base_test, y_base_test)
+        aug_m  = _eval(augmented_model, X_aug_test, y_aug_test)
+
+        # ── Sample counts for the Overview KPI cards ──────────────────────
+        counts = {
+            "real_normal":  int(len(normal_w)),
+            "real_anomaly": int(len(anomaly_w)),
+            "syn_normal":   int(len(syn_norm)),
+            "syn_anomaly":  int(len(syn_anom)),
+            "total_real":   int(len(normal_w) + len(anomaly_w)),
+            "total_syn":    int(len(syn_norm) + len(syn_anom)),
         }
 
-    base_m = _eval(baseline_model, X_base_test, y_base_test)
-    aug_m  = _eval(augmented_model, X_aug_test, y_aug_test)
+        return {"baseline": base_m, "augmented": aug_m, "counts": counts}, None
 
-    # ── Sample counts for the Overview KPI cards ──────────────────────────
-    counts = {
-        "real_normal":  int(len(normal_w)),
-        "real_anomaly": int(len(anomaly_w)),
-        "syn_normal":   int(len(syn_norm)),
-        "syn_anomaly":  int(len(syn_anom)),
-        "total_real":   int(len(normal_w) + len(anomaly_w)),
-        "total_syn":    int(len(syn_norm) + len(syn_anom)),
-    }
+    except Exception as e:
+        return None, f"Error computing metrics from .npy files: {e}"
 
-    return {"baseline": base_m, "augmented": aug_m, "counts": counts}
+
+def get_metrics():
+    """
+    Return the metrics dict or None.  Tries metrics.json first, then falls
+    back to recomputing from .npy files.  Returns (metrics_dict, error_msg).
+    """
+    metrics, err = load_metrics_from_json()
+    if metrics is not None:
+        return metrics, None
+
+    # Fallback: compute from raw data files
+    metrics, err2 = compute_metrics_from_npy()
+    if metrics is not None:
+        return metrics, None
+
+    # Both paths failed — combine error messages
+    return None, f"{err}  |  Fallback also failed: {err2}"
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -333,6 +448,28 @@ def metric_card(icon, value, label, accent=""):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# HELPER: find contiguous anomaly segments efficiently using NumPy
+# ═══════════════════════════════════════════════════════════════════════════
+def find_anomaly_segments(labels_array):
+    """
+    Given a 1-D array/Series of 0s and 1s, return a list of (start_idx, end_idx)
+    tuples marking contiguous runs of 1s.  Uses NumPy diff for speed instead
+    of a Python-level row-by-row loop.
+    """
+    if len(labels_array) == 0:
+        return []
+
+    arr = np.asarray(labels_array, dtype=int)
+    # Pad with 0 at both ends so transitions at boundaries are detected
+    padded = np.concatenate([[0], arr, [0]])
+    diff = np.diff(padded)
+    # Rising edges (0→1) mark segment starts; falling edges (1→0) mark ends
+    starts = np.where(diff == 1)[0]
+    ends   = np.where(diff == -1)[0] - 1  # inclusive end index
+    return list(zip(starts.tolist(), ends.tolist()))
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # PAGE 1 — OVERVIEW
 # ═══════════════════════════════════════════════════════════════════════════
 if page == "🏠  Overview":
@@ -348,15 +485,18 @@ if page == "🏠  Overview":
     )
 
     # ── KPI cards row ─────────────────────────────────────────────────────
-    try:
-        metrics = compute_all_metrics()
+    metrics, metrics_err = get_metrics()
+
+    if metrics is not None:
         counts = metrics["counts"]
         base   = metrics["baseline"]
         aug    = metrics["augmented"]
 
-        # Percentage-point improvements
-        recall_imp = (aug["Recall"] - base["Recall"]) * 100
-        f1_imp     = (aug["F1-Score"] - base["F1-Score"]) * 100
+        # Percentage-point improvements (guard against zero-division)
+        base_recall = base["Recall"]
+        base_f1     = base["F1-Score"]
+        recall_imp  = (aug["Recall"] - base_recall) * 100
+        f1_imp      = (aug["F1-Score"] - base_f1) * 100
 
         c1, c2, c3, c4 = st.columns(4)
         with c1:
@@ -375,11 +515,11 @@ if page == "🏠  Overview":
             metric_card(
                 "📈", f"+{f1_imp:.2f} pp", "F1-Score Improvement", "accent-green",
             )
-
-    except FileNotFoundError:
+    else:
         st.warning(
-            "⚠️ Data files not found.  Run `preprocess.py` and "
-            "`train_model.py` first to generate the `.npy` / `.pkl` files."
+            "⚠️ Metrics data not available.  Run `train_model.py` to generate "
+            "`metrics.json` (or ensure the `.npy` / `.pkl` files are present).  "
+            f"Detail: {metrics_err}"
         )
 
     st.divider()
@@ -458,8 +598,9 @@ elif page == "📊  Model Performance":
         unsafe_allow_html=True,
     )
 
-    try:
-        metrics = compute_all_metrics()
+    metrics, metrics_err = get_metrics()
+
+    if metrics is not None:
         base = metrics["baseline"]
         aug  = metrics["augmented"]
 
@@ -496,8 +637,14 @@ elif page == "📊  Model Performance":
 
         def _render_cm(cm, title):
             """Return an HTML string for a styled 2×2 confusion matrix."""
-            tn, fp = cm[0][0], cm[0][1]
-            fn, tp = cm[1][0], cm[1][1]
+            try:
+                tn, fp = int(cm[0][0]), int(cm[0][1])
+                fn, tp = int(cm[1][0]), int(cm[1][1])
+            except (IndexError, TypeError, ValueError):
+                return (
+                    f'<p style="color:#991b1b;">Could not render confusion '
+                    f'matrix for {title}.</p>'
+                )
             return f"""
             <div style="text-align:center;">
                 <p style="font-weight:600; color:#334155; margin-bottom:10px;">
@@ -558,10 +705,11 @@ elif page == "📊  Model Performance":
             unsafe_allow_html=True,
         )
 
-    except FileNotFoundError:
+    else:
         st.error(
             "Required data files are missing.  Run `preprocess.py` and "
-            "`train_model.py` to generate them."
+            "`train_model.py` to generate them.  "
+            f"Detail: {metrics_err}"
         )
 
 
@@ -594,206 +742,259 @@ elif page == "🔮  Live Prediction":
         unsafe_allow_html=True,
     )
 
-    # ── File uploader ─────────────────────────────────────────────────────
-    uploaded = st.file_uploader("Upload sensor CSV", type=["csv"])
+    # ── Pre-check: are the model and scaler available? ────────────────────
+    model_obj, model_err = load_augmented_model()
+    scaler_obj, scaler_err = load_scaler()
 
-    if uploaded is not None:
+    if model_err:
+        st.error(f"❌ Cannot run predictions — {model_err}")
+    if scaler_err:
+        st.error(f"❌ Cannot run predictions — {scaler_err}")
 
-        # 1. Read the CSV ──────────────────────────────────────────────────
-        try:
-            df = pd.read_csv(uploaded, parse_dates=["timestamp"])
-        except Exception as e:
-            st.error(f"❌ Could not parse the uploaded file: {e}")
-            st.stop()
+    # Only show the uploader if the essential files are loadable
+    if model_obj is not None and scaler_obj is not None:
 
-        # 2. Validate columns ─────────────────────────────────────────────
-        required = {"timestamp", "temperature", "vibration", "pressure"}
-        if not required.issubset(set(df.columns)):
-            missing = required - set(df.columns)
-            st.error(
-                f"❌ Missing columns: **{', '.join(sorted(missing))}**.  "
-                "The CSV needs: `timestamp`, `temperature`, `vibration`, "
-                "`pressure`."
+        # ── File uploader ─────────────────────────────────────────────────
+        uploaded = st.file_uploader("Upload sensor CSV", type=["csv"])
+
+        if uploaded is not None:
+
+            # 1. Read the CSV ──────────────────────────────────────────────
+            try:
+                df = pd.read_csv(uploaded)
+            except Exception as e:
+                st.error(f"❌ Could not parse the uploaded file: {e}")
+                st.stop()
+
+            # 2. Validate columns ─────────────────────────────────────────
+            required = {"timestamp", "temperature", "vibration", "pressure"}
+            if not required.issubset(set(df.columns)):
+                missing = required - set(df.columns)
+                st.error(
+                    f"❌ Missing columns: **{', '.join(sorted(missing))}**.  "
+                    "The CSV needs: `timestamp`, `temperature`, `vibration`, "
+                    "`pressure`."
+                )
+                st.stop()
+
+            # Parse timestamps safely (after column validation)
+            try:
+                df["timestamp"] = pd.to_datetime(df["timestamp"])
+            except Exception as e:
+                st.error(
+                    f"❌ Could not parse the `timestamp` column: {e}.  "
+                    "Make sure it contains valid date/time values."
+                )
+                st.stop()
+
+            # 3. Check minimum rows ───────────────────────────────────────
+            SEQ_LEN = 24  # must match the window length used during training
+            if len(df) < SEQ_LEN:
+                st.error(
+                    f"❌ Only **{len(df)}** rows — at least **{SEQ_LEN}** are "
+                    "needed to create one sliding window."
+                )
+                st.stop()
+
+            # Validate that sensor columns are numeric
+            feature_cols = ["temperature", "vibration", "pressure"]
+            for col_name in feature_cols:
+                if not np.issubdtype(df[col_name].dtype, np.number):
+                    try:
+                        df[col_name] = pd.to_numeric(df[col_name], errors="coerce")
+                    except Exception:
+                        pass
+                if df[col_name].isna().all():
+                    st.error(
+                        f"❌ Column `{col_name}` contains no valid numeric data."
+                    )
+                    st.stop()
+
+            # Drop rows with NaN in sensor columns (warn if any)
+            nan_count = df[feature_cols].isna().sum().sum()
+            if nan_count > 0:
+                st.warning(
+                    f"⚠️ Found {nan_count} NaN value(s) in sensor columns — "
+                    "those rows will be dropped."
+                )
+                df = df.dropna(subset=feature_cols).reset_index(drop=True)
+                if len(df) < SEQ_LEN:
+                    st.error(
+                        f"❌ After dropping NaN rows, only **{len(df)}** rows "
+                        f"remain — at least **{SEQ_LEN}** are required."
+                    )
+                    st.stop()
+
+            st.success(f"✅ Loaded **{len(df):,}** rows successfully.")
+
+            # 4. Scale features with the saved scaler ─────────────────────
+            try:
+                df_scaled = df.copy()
+                df_scaled[feature_cols] = scaler_obj.transform(
+                    df[feature_cols].values
+                )
+            except Exception as e:
+                st.error(f"❌ Scaling failed: {e}")
+                st.stop()
+
+            # 5. Create sliding windows (same logic as preprocess.py) ─────
+            def create_windows(data, seq_len, step=1):
+                """
+                Slide a window of `seq_len` rows over `data`.
+                Returns a 3-D NumPy array: (num_windows, seq_len, num_features).
+                """
+                windows = []
+                for start in range(0, len(data) - seq_len + 1, step):
+                    windows.append(data[start : start + seq_len])
+                return np.array(windows)
+
+            windows = create_windows(
+                df_scaled[feature_cols].values, SEQ_LEN
             )
-            st.stop()
+            # Flatten each window to 1-D: (N, 24, 3) → (N, 72)
+            windows_flat = windows.reshape(len(windows), -1)
 
-        # 3. Check minimum rows ───────────────────────────────────────────
-        SEQ_LEN = 24  # must match the window length used during training
-        if len(df) < SEQ_LEN:
-            st.error(
-                f"❌ Only **{len(df)}** rows — at least **{SEQ_LEN}** are "
-                "needed to create one sliding window."
-            )
-            st.stop()
+            # 6. Run predictions ──────────────────────────────────────────
+            try:
+                preds = model_obj.predict(windows_flat)  # 0 = normal, 1 = anomaly
+            except Exception as e:
+                st.error(f"❌ Model prediction failed: {e}")
+                st.stop()
 
-        st.success(f"✅ Loaded **{len(df):,}** rows successfully.")
+            total    = len(preds)
+            n_anom   = int(np.sum(preds))
+            n_norm   = total - n_anom
+            anom_pct = (n_anom / total * 100) if total else 0.0
 
-        # 4. Scale features with the saved scaler ─────────────────────────
-        feature_cols = ["temperature", "vibration", "pressure"]
-        scaler = load_scaler()
-        df_scaled = df.copy()
-        df_scaled[feature_cols] = scaler.transform(df[feature_cols])
+            # 7. Summary metric cards ─────────────────────────────────────
+            st.divider()
+            st.markdown("#### 📋 Prediction Summary")
 
-        # 5. Create sliding windows (same logic as preprocess.py) ─────────
-        def create_windows(data, seq_len, step=1):
-            """
-            Slide a window of `seq_len` rows over `data`.
-            Returns a 3-D NumPy array: (num_windows, seq_len, num_features).
-            """
-            windows = []
-            for start in range(0, len(data) - seq_len + 1, step):
-                windows.append(data[start : start + seq_len])
-            return np.array(windows)
+            s1, s2, s3 = st.columns(3)
+            with s1:
+                metric_card("🔍", f"{total:,}", "Windows Analyzed", "accent-blue")
+            with s2:
+                metric_card("🚨", f"{n_anom:,}", "Anomalies Detected")
+            with s3:
+                metric_card("📉", f"{anom_pct:.1f}%", "Anomaly Rate", "accent-purple")
 
-        windows = create_windows(df_scaled[feature_cols].values, SEQ_LEN)
-        # Flatten each window to 1-D: (N, 24, 3) → (N, 72)
-        windows_flat = windows.reshape(len(windows), -1)
+            # 8. Map window predictions → per-row labels ──────────────────
+            #    A row is flagged anomalous if ANY window containing it was
+            #    predicted as anomaly.
+            row_labels = np.zeros(len(df), dtype=int)
+            for i, p in enumerate(preds):
+                if p == 1:
+                    row_labels[i : i + SEQ_LEN] = 1
+            df["predicted"] = row_labels
 
-        # 6. Run predictions ──────────────────────────────────────────────
-        model = load_augmented_model()
-        preds = model.predict(windows_flat)  # 0 = normal, 1 = anomaly
+            # 9. Interactive Plotly chart with anomaly shading ─────────────
+            st.divider()
+            st.markdown("#### 📉 Sensor Readings with Predicted Anomalies")
 
-        total    = len(preds)
-        n_anom   = int(preds.sum())
-        n_norm   = total - n_anom
-        anom_pct = (n_anom / total * 100) if total else 0.0
-
-        # 7. Summary metric cards ─────────────────────────────────────────
-        st.divider()
-        st.markdown("#### 📋 Prediction Summary")
-
-        s1, s2, s3 = st.columns(3)
-        with s1:
-            metric_card("🔍", f"{total:,}", "Windows Analyzed", "accent-blue")
-        with s2:
-            metric_card("🚨", f"{n_anom:,}", "Anomalies Detected")
-        with s3:
-            metric_card("📉", f"{anom_pct:.1f}%", "Anomaly Rate", "accent-purple")
-
-        # 8. Map window predictions → per-row labels ──────────────────────
-        #    A row is flagged anomalous if ANY window containing it was
-        #    predicted as anomaly.
-        row_labels = np.zeros(len(df), dtype=int)
-        for i, p in enumerate(preds):
-            if p == 1:
-                row_labels[i : i + SEQ_LEN] = 1
-        df["predicted"] = row_labels
-
-        # 9. Interactive Plotly chart with anomaly shading ─────────────────
-        st.divider()
-        st.markdown("#### 📉 Sensor Readings with Predicted Anomalies")
-
-        fig = make_subplots(
-            rows=3,
-            cols=1,
-            shared_xaxes=True,
-            vertical_spacing=0.06,
-            subplot_titles=(
-                "Temperature (°F)",
-                "Vibration (mm/s)",
-                "Pressure (PSI)",
-            ),
-        )
-
-        line_colors = {
-            "temperature": "#0ea5e9",
-            "vibration":   "#f59e0b",
-            "pressure":    "#10b981",
-        }
-
-        for idx, sensor in enumerate(feature_cols, start=1):
-            # Draw the sensor signal
-            fig.add_trace(
-                go.Scatter(
-                    x=df["timestamp"],
-                    y=df[sensor],
-                    mode="lines",
-                    name=sensor.capitalize(),
-                    line=dict(color=line_colors[sensor], width=1.2),
+            fig = make_subplots(
+                rows=3,
+                cols=1,
+                shared_xaxes=True,
+                vertical_spacing=0.06,
+                subplot_titles=(
+                    "Temperature (°F)",
+                    "Vibration (mm/s)",
+                    "Pressure (PSI)",
                 ),
-                row=idx,
-                col=1,
             )
 
-            # Shade contiguous anomaly regions in red
-            in_anom = False
-            start_ts = None
-            for i in range(len(df)):
-                if df["predicted"].iloc[i] == 1 and not in_anom:
-                    start_ts = df["timestamp"].iloc[i]
-                    in_anom = True
-                elif df["predicted"].iloc[i] == 0 and in_anom:
+            line_colors = {
+                "temperature": "#0ea5e9",
+                "vibration":   "#f59e0b",
+                "pressure":    "#10b981",
+            }
+
+            # Pre-compute anomaly segments once (vectorised, fast)
+            anomaly_segments = find_anomaly_segments(df["predicted"].values)
+
+            for idx, sensor in enumerate(feature_cols, start=1):
+                # Draw the sensor signal
+                fig.add_trace(
+                    go.Scatter(
+                        x=df["timestamp"],
+                        y=df[sensor],
+                        mode="lines",
+                        name=sensor.capitalize(),
+                        line=dict(color=line_colors[sensor], width=1.2),
+                    ),
+                    row=idx,
+                    col=1,
+                )
+
+                # Shade contiguous anomaly regions in red
+                for seg_start, seg_end in anomaly_segments:
                     fig.add_vrect(
-                        x0=start_ts,
-                        x1=df["timestamp"].iloc[i - 1],
+                        x0=df["timestamp"].iloc[seg_start],
+                        x1=df["timestamp"].iloc[seg_end],
                         fillcolor="red",
                         opacity=0.15,
                         line_width=0,
                         row=idx,
                         col=1,
                     )
-                    in_anom = False
-            # Handle anomaly extending to the last row
-            if in_anom:
-                fig.add_vrect(
-                    x0=start_ts,
-                    x1=df["timestamp"].iloc[-1],
-                    fillcolor="red",
-                    opacity=0.15,
-                    line_width=0,
-                    row=idx,
-                    col=1,
+
+            fig.update_layout(
+                height=680,
+                hovermode="x unified",
+                template="plotly_white",
+                margin=dict(t=40, b=30),
+                legend=dict(
+                    orientation="h", yanchor="bottom", y=1.02,
+                    xanchor="right", x=1,
+                ),
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+            # 10. Download results as CSV ─────────────────────────────────
+            st.divider()
+            st.markdown("#### 📥 Export Results")
+
+            # Build a per-window results table
+            window_results = pd.DataFrame(
+                {
+                    "window_index":    range(total),
+                    "start_timestamp": [
+                        df["timestamp"].iloc[i] for i in range(total)
+                    ],
+                    "end_timestamp": [
+                        df["timestamp"].iloc[i + SEQ_LEN - 1]
+                        for i in range(total)
+                    ],
+                    "prediction": [
+                        "Anomaly" if p == 1 else "Normal" for p in preds
+                    ],
+                }
+            )
+
+            csv_bytes = window_results.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                label="⬇️  Download Prediction Results (CSV)",
+                data=csv_bytes,
+                file_name="anomaly_predictions.csv",
+                mime="text/csv",
+            )
+
+            # Expandable raw data table
+            with st.expander("🗂️ View per-window results"):
+                st.dataframe(
+                    window_results, use_container_width=True, hide_index=True,
                 )
 
-        fig.update_layout(
-            height=680,
-            hovermode="x unified",
-            template="plotly_white",
-            margin=dict(t=40, b=30),
-            legend=dict(
-                orientation="h", yanchor="bottom", y=1.02,
-                xanchor="right", x=1,
-            ),
-        )
-        st.plotly_chart(fig, use_container_width=True)
-
-        # 10. Download results as CSV ─────────────────────────────────────
-        st.divider()
-        st.markdown("#### 📥 Export Results")
-
-        # Build a per-window results table
-        window_results = pd.DataFrame(
-            {
-                "window_index":    range(total),
-                "start_timestamp": [
-                    df["timestamp"].iloc[i] for i in range(total)
-                ],
-                "end_timestamp": [
-                    df["timestamp"].iloc[i + SEQ_LEN - 1] for i in range(total)
-                ],
-                "prediction": [
-                    "Anomaly" if p == 1 else "Normal" for p in preds
-                ],
-            }
-        )
-
-        csv_bytes = window_results.to_csv(index=False).encode("utf-8")
-        st.download_button(
-            label="⬇️  Download Prediction Results (CSV)",
-            data=csv_bytes,
-            file_name="anomaly_predictions.csv",
-            mime="text/csv",
-        )
-
-        # Expandable raw data table
-        with st.expander("🗂️ View per-window results"):
-            st.dataframe(
-                window_results, use_container_width=True, hide_index=True,
+        else:
+            # Prompt when no file is uploaded yet
+            st.info(
+                "👆 Upload a CSV to get started.  You can use the project's own "
+                "`iot_sensor_data.csv` as a quick test."
             )
 
     else:
-        # Prompt when no file is uploaded yet
+        # Model or scaler could not be loaded — upload form hidden
         st.info(
-            "👆 Upload a CSV to get started.  You can use the project's own "
-            "`iot_sensor_data.csv` as a quick test."
+            "The file uploader will appear once the model and scaler files "
+            "are available."
         )
