@@ -3,15 +3,18 @@ __pycache__/
 *.pyc
 .ipynb_checkpoints/
 
-# Generated data (not needed for app)
+# Generated data
 *.npy
-timestamps.csv
 
-# Ignore all pkl except the ones the app needs
+# Keep timestamps
+!timestamps.csv
+
+# Keep required models
 *.pkl
+!model_baseline.pkl
 !model_augmented.pkl
 !scaler.pkl
 
-# Trained TimeGAN models (large, not needed for app)
+# Ignore TimeGAN folders
 timegan_model/
 timegan_anomaly_model/
