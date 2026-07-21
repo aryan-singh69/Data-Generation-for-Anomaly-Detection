@@ -4,7 +4,8 @@ Generate Synthetic IoT Sensor Data for Anomaly Detection
 This script simulates a machine with 3 sensors (temperature, vibration,
 pressure) recording every minute for 30 days. Normal behaviour follows
 smooth sine-wave patterns with small noise; anomalies are randomly
-injected as short windows of abnormal spikes or drops.
+injected as short windows of *subtle* deviations that partially overlap
+with normal readings, making detection non-trivial.
 
 Output: iot_sensor_data.csv
 Columns: timestamp, temperature, vibration, pressure, label (0/1)
@@ -18,7 +19,7 @@ from datetime import datetime, timedelta
 SEED = 42                       # For reproducibility
 DAYS = 30                       # Duration of simulation
 SAMPLE_INTERVAL_MIN = 1         # One reading per minute
-NUM_ANOMALY_WINDOWS = 25        # Number of anomaly windows (between 20-30)
+NUM_ANOMALY_WINDOWS = 18        # Number of anomaly windows (15-20 range)
 ANOMALY_MIN_LEN = 10            # Shortest anomaly window (minutes)
 ANOMALY_MAX_LEN = 60            # Longest  anomaly window (minutes)
 
@@ -52,40 +53,56 @@ temperature = generate_normal_signal(SENSOR_PARAMS["temperature"])
 vibration   = generate_normal_signal(SENSOR_PARAMS["vibration"])
 pressure    = generate_normal_signal(SENSOR_PARAMS["pressure"])
 
-# ── Step 3: Inject anomaly windows ──────────────────────────────────────────
-# Pick random start positions and lengths, then distort readings in those windows.
+# ── Step 3: Inject SUBTLE anomaly windows ───────────────────────────────────
+# Anomalies deviate only 1.5x–2.5x above the normal noise level, and each
+# window affects a random subset of sensors (1, 2, or all 3). This creates
+# realistic overlap between normal and anomaly distributions so a classifier
+# can't trivially separate them without enough training data.
 labels = np.zeros(total_minutes, dtype=int)             # 0 = normal everywhere
+
+# Noise-relative deviation ranges  (multiplier × sensor noise_std)
+# A 2× multiplier means the shift is only twice the normal noise — subtle!
+SUBTLE_SHIFT = {
+    "temperature": SENSOR_PARAMS["temperature"]["noise_std"],  # 0.5
+    "vibration":   SENSOR_PARAMS["vibration"]["noise_std"],    # 0.02
+    "pressure":    SENSOR_PARAMS["pressure"]["noise_std"],     # 0.3
+}
 
 anomaly_starts = np.random.randint(0, total_minutes - ANOMALY_MAX_LEN,
                                    size=NUM_ANOMALY_WINDOWS)
 anomaly_lengths = np.random.randint(ANOMALY_MIN_LEN, ANOMALY_MAX_LEN + 1,
                                     size=NUM_ANOMALY_WINDOWS)
 
+sensor_arrays = {"temperature": temperature,
+                 "vibration":   vibration,
+                 "pressure":    pressure}
+
 for start, length in zip(anomaly_starts, anomaly_lengths):
     end = min(start + length, total_minutes)            # Don't exceed array
     labels[start:end] = 1                               # Mark as anomaly
+    n = end - start
+
+    # Randomly choose which sensors are affected (1, 2, or 3)
+    num_affected = np.random.choice([1, 2, 3], p=[0.3, 0.4, 0.3])
+    affected = np.random.choice(list(sensor_arrays.keys()),
+                                size=num_affected, replace=False)
 
     # Choose a random fault type for variety
     fault_type = np.random.choice(["spike", "drop", "erratic"])
 
-    if fault_type == "spike":
-        # Sudden upward shift
-        temperature[start:end] += np.random.uniform(10, 25)
-        vibration[start:end]   += np.random.uniform(0.3, 0.8)
-        pressure[start:end]    += np.random.uniform(5, 15)
+    for sensor_name in affected:
+        sigma = SUBTLE_SHIFT[sensor_name]               # Normal noise level
+        arr = sensor_arrays[sensor_name]
 
-    elif fault_type == "drop":
-        # Sudden downward shift
-        temperature[start:end] -= np.random.uniform(10, 20)
-        vibration[start:end]   -= np.random.uniform(0.2, 0.5)
-        pressure[start:end]    -= np.random.uniform(5, 12)
+        # Shift magnitude: 1.5× – 2.5× the normal noise standard deviation
+        multiplier = np.random.uniform(1.5, 2.5)
 
-    else:  # erratic
-        # Wild random fluctuations
-        n = end - start
-        temperature[start:end] += np.random.normal(0, 8, n)
-        vibration[start:end]   += np.random.normal(0, 0.4, n)
-        pressure[start:end]    += np.random.normal(0, 6, n)
+        if fault_type == "spike":
+            arr[start:end] += sigma * multiplier
+        elif fault_type == "drop":
+            arr[start:end] -= sigma * multiplier
+        else:  # erratic — per-point random jitter at 1.5-2.5× noise
+            arr[start:end] += np.random.normal(0, sigma * multiplier, n)
 
 # ── Step 4: Build DataFrame and save to CSV ─────────────────────────────────
 df = pd.DataFrame({
