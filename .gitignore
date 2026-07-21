@@ -2,6 +2,12 @@ venv/
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
+
+# Generated data
 *.npy
+*.csv
+*.pkl
+
+# Trained models
 timegan_model/
 timegan_anomaly_model/
